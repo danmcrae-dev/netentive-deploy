@@ -133,9 +133,9 @@ title "Step 3: Starting Colima VM"
 # Check if Colima is already running
 if colima status 2>/dev/null | grep -q "Running"; then
     ok "Colima is already running"
-    # Verify host networking is enabled
+    # Check if host networking is enabled
     if ! docker info 2>/dev/null | grep -q "host"; then
-        warn "Colima running but host networking may not be enabled — restarting with --network-address"
+        warn "Colima running but host networking may not be enabled — restarting"
         colima stop
         colima start --cpu "${COLIMA_CPU}" --memory "${COLIMA_MEMORY}" --disk "${COLIMA_DISK}" --network-address --dns 8.8.8.8
     fi
@@ -144,6 +144,21 @@ else
     info "This takes 30-60 seconds on first run..."
     colima start --cpu "${COLIMA_CPU}" --memory "${COLIMA_MEMORY}" --disk "${COLIMA_DISK}" --network-address --dns 8.8.8.8
 fi
+
+# Quick DNS connectivity test — try to pull a tiny image.
+# If this fails, restart Colima with explicit DNS (fixes IPv6 Docker Hub issues).
+info "Testing Docker Hub connectivity..."
+if ! docker pull hello-world 2>/dev/null; then
+    warn "Docker Hub pull failed — restarting Colima with explicit DNS (8.8.8.8)..."
+    colima stop
+    colima start --cpu "${COLIMA_CPU}" --memory "${COLIMA_MEMORY}" --disk "${COLIMA_DISK}" --network-address --dns 8.8.8.8
+    if ! docker pull hello-world 2>/dev/null; then
+        err "Cannot pull images from Docker Hub. Check your internet connection."
+        err "If you're behind a VPN or firewall, try: colima start --network-address --dns 1.1.1.1"
+        exit 1
+    fi
+fi
+ok "Docker Hub connectivity verified"
 
 # Verify Docker daemon is responsive
 if ! docker info &>/dev/null; then
