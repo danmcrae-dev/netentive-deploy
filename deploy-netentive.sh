@@ -23,6 +23,17 @@ set -euo pipefail
 # ==================================================================
 
 # ------------------------------------------------------------------
+# If running via pipe (curl | bash), save to temp file and re-exec
+# so stdin is free for commands like colima ssh that read stdin.
+# ------------------------------------------------------------------
+if [[ ! -t 0 && "${0}" == "bash" ]]; then
+    TMP_SCRIPT="$(mktemp /tmp/netentive-deploy.XXXXXX.sh)"
+    cat > "$TMP_SCRIPT"
+    chmod +x "$TMP_SCRIPT"
+    exec bash "$TMP_SCRIPT" "$@"
+fi
+
+# ------------------------------------------------------------------
 # Parse command-line arguments (must happen before anything else)
 # ------------------------------------------------------------------
 LICENSE_KEY=""
