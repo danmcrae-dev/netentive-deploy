@@ -137,12 +137,12 @@ if colima status 2>/dev/null | grep -q "Running"; then
     if ! docker info 2>/dev/null | grep -q "host"; then
         warn "Colima running but host networking may not be enabled — restarting with --network-address"
         colima stop
-        colima start --cpu "${COLIMA_CPU}" --memory "${COLIMA_MEMORY}" --disk "${COLIMA_DISK}" --network-address
+        colima start --cpu "${COLIMA_CPU}" --memory "${COLIMA_MEMORY}" --disk "${COLIMA_DISK}" --network-address --dns 8.8.8.8
     fi
 else
     info "Starting Colima VM (${COLIMA_CPU} CPU, ${COLIMA_MEMORY}GB RAM, ${COLIMA_DISK}GB disk)..."
     info "This takes 30-60 seconds on first run..."
-    colima start --cpu "${COLIMA_CPU}" --memory "${COLIMA_MEMORY}" --disk "${COLIMA_DISK}" --network-address
+    colima start --cpu "${COLIMA_CPU}" --memory "${COLIMA_MEMORY}" --disk "${COLIMA_DISK}" --network-address --dns 8.8.8.8
 fi
 
 # Verify Docker daemon is responsive
