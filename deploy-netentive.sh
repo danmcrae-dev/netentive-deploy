@@ -487,17 +487,37 @@ ok "SaaS containers started"
 
 # Wait for postgres, then run migrations
 info "Waiting for PostgreSQL..."
-for i in 1 2 3 4 5 6 7 8 9 10; do
+PG_READY=false
+for i in $(seq 1 30); do
     if docker compose exec -T postgres pg_isready -U netentive 2>/dev/null; then
         ok "PostgreSQL is ready"
+        PG_READY=true
         break
     fi
-    info "  Waiting... ($i/10)"
+    info "  Waiting... ($i/30)"
     sleep 3
 done
 
+if [[ "$PG_READY" != "true" ]]; then
+    err "PostgreSQL did not become ready in 90 seconds."
+    err "Checking container status..."
+    docker compose ps
+    err "Postgres logs (last 20 lines):"
+    docker compose logs --tail 20 postgres 2>&1
+    exit 1
+fi
+
 info "Running database migrations..."
-docker compose exec -T api python -m alembic upgrade head 2>&1 | tail -5
+set +e
+docker compose exec -T api python -m alembic upgrade head 2>&1
+MIGRATE_EXIT=$?
+set -e
+if [[ $MIGRATE_EXIT -ne 0 ]]; then
+    err "Database migrations failed (exit code $MIGRATE_EXIT)."
+    err "SaaS API logs (last 20 lines):"
+    docker compose logs --tail 20 api 2>&1
+    exit 1
+fi
 ok "Database migrations complete"
 
 # ==================================================================
