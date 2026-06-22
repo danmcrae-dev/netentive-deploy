@@ -158,7 +158,26 @@ if ! docker pull hello-world 2>/dev/null; then
         exit 1
     fi
 fi
-ok "Docker Hub connectivity verified"
+ok "Docker Hub connectivity verified (docker pull)"
+
+# Disable IPv6 inside Colima VM — Docker BuildKit prefers IPv6 for auth.docker.io
+# which fails on some Mac networks. Forcing IPv4 fixes "socket is not connected" errors.
+info "Disabling IPv6 in Colima VM (fixes Docker BuildKit auth failures)..."
+colima ssh -- sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null
+colima ssh -- sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null
+ok "IPv6 disabled in Colima VM"
+
+# Test that docker build can fetch metadata now (the real failure point)
+info "Verifying Docker Build metadata resolution..."
+if ! docker build --no-cache -f- -t /dev/null . <<'DOCKERFILE' 2>/dev/null
+FROM python:3.11-slim
+RUN echo "buildkit-ok"
+DOCKERFILE
+then
+    warn "BuildKit metadata test failed — trying legacy builder..."
+    export DOCKER_BUILDKIT=0
+fi
+ok "Docker build ready"
 
 # Verify Docker daemon is responsive
 if ! docker info &>/dev/null; then
