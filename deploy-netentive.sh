@@ -163,30 +163,34 @@ ok "Docker Hub connectivity verified (docker pull)"
 # Disable IPv6 inside Colima VM — Docker BuildKit prefers IPv6 for auth.docker.io
 # which fails on some Mac networks. Forcing IPv4 fixes "socket is not connected" errors.
 info "Disabling IPv6 in Colima VM (fixes Docker BuildKit auth failures)..."
-colima ssh -- sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 2>/dev/null || true
-colima ssh -- sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 2>/dev/null || true
+set +e
+colima ssh -- sudo sh -c 'sysctl -w net.ipv6.conf.all.disable_ipv6=1; sysctl -w net.ipv6.conf.default.disable_ipv6=1' 2>/dev/null
+set -e
 ok "IPv6 disabled in Colima VM"
 
 # Test that docker build can fetch metadata now (the real failure point)
 info "Verifying Docker Build metadata resolution..."
-BUILD_TEST_OK=false
+set +e
 docker build --no-cache -f- -t netentive-build-test:latest . <<'DOCKERFILE' 2>/dev/null
 FROM python:3.11-slim
 RUN echo "buildkit-ok"
 DOCKERFILE
-if [[ $? -eq 0 ]]; then
-    BUILD_TEST_OK=true
+BUILD_EXIT=$?
+set -e
+if [[ $BUILD_EXIT -eq 0 ]]; then
     docker rmi netentive-build-test:latest 2>/dev/null || true
     ok "Docker build verified (BuildKit + IPv4)"
 else
     warn "BuildKit test failed — disabling BuildKit (using legacy builder)"
     export DOCKER_BUILDKIT=0
-    # Quick retest with legacy builder
+    set +e
     docker build --no-cache -f- -t netentive-build-test:latest . <<'DOCKERFILE2' 2>/dev/null
 FROM python:3.11-slim
 RUN echo "legacy-ok"
 DOCKERFILE2
-    if [[ $? -eq 0 ]]; then
+    LEGACY_EXIT=$?
+    set -e
+    if [[ $LEGACY_EXIT -eq 0 ]]; then
         docker rmi netentive-build-test:latest 2>/dev/null || true
         ok "Docker build verified (legacy builder)"
     else
