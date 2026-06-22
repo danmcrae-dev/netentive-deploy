@@ -485,6 +485,14 @@ title "Step 8: Building and starting SaaS"
 
 info "Building SaaS images (this takes 3-8 minutes on first run)..."
 cd "$INSTALL_DIR/netentive-saas/deployment"
+
+# Source the .env file so docker-compose can resolve ${VARS} on the host side.
+# docker-compose resolves ${} from shell env, not from env_file directive.
+# env_file loads vars INTO the container, but host-side substitution needs them in the shell.
+set -a
+source "$INSTALL_DIR/netentive-saas/.env"
+set +a
+
 docker compose up -d --build 2>&1 | tail -20
 
 ok "SaaS containers started"
@@ -534,6 +542,12 @@ mkdir -p "$HOME/.ssh/netentive_agents" 2>/dev/null || true
 
 info "Building MCP images (this takes 2-5 minutes)..."
 cd "$INSTALL_DIR/netentive-mcp"
+
+# Source the MCP .env file so docker-compose can resolve ${VARS} on the host side.
+set -a
+source "$INSTALL_DIR/netentive-mcp/.env"
+set +a
+
 docker compose up -d --build 2>&1 | tail -20
 
 ok "MCP containers started"
