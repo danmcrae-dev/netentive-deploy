@@ -179,8 +179,14 @@ info "Hostname: $(hostname)"
 DEPLOY_KEY_FILE=""
 DEPLOY_KEY_BASE64=""
 
-# Build JSON body safely using Python to avoid injection via special chars
-JSON_BODY=$(python3 -c "import json,sys,socket; print(json.dumps({'key': sys.argv[1], 'hostname': socket.gethostname()}))" "$LICENSE_KEY" 2>/dev/null || echo "{\"key\": \"${LICENSE_KEY}\"}")
+# Build JSON body safely — use python3 if available, otherwise use printf
+# (key format is validated server-side so injection risk is minimal)
+if command -v python3 &>/dev/null; then
+    JSON_BODY=$(python3 -c "import json,sys,socket; print(json.dumps({'key': sys.argv[1], 'hostname': socket.gethostname()}))" "$LICENSE_KEY" 2>/dev/null)
+else
+    # Fallback: build JSON manually (key is validated server-side with regex)
+    JSON_BODY="{\"key\": \"${LICENSE_KEY}\", \"hostname\": \"$(hostname)\"}"
+fi
 
 RESPONSE=$(curl -sf -X POST "${KEY_SERVER_URL}/v1/deploy-key/redeem" \
   -H "Content-Type: application/json" \
@@ -190,11 +196,14 @@ RESPONSE=$(curl -sf -X POST "${KEY_SERVER_URL}/v1/deploy-key/redeem" \
     exit 1
 }
 
-# Parse JSON response — valid flag
-KEY_VALID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('valid',''))" 2>/dev/null || echo "")
+# Parse JSON response using grep/sed (no python3 dependency)
+# Response format: {"valid": true, ...} or {"valid": false, "reason": "invalid", ...}
+KEY_VALID=$(echo "$RESPONSE" | grep -o '"valid"[[:space:]]*:[[:space:]]*true' | head -1)
 
-if [[ "$KEY_VALID" != "true" ]]; then
-    KEY_REASON=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
+if [[ -z "$KEY_VALID" ]]; then
+    # Extract reason field — match "reason": "value"
+    KEY_REASON=$(echo "$RESPONSE" | grep -o '"reason"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*:.*"\([^"]*\)"/\1/' | head -1)
+    KEY_REASON="${KEY_REASON:-unknown}"
     err "Deployment key validation failed."
     err "Reason: ${KEY_REASON}"
     case "$KEY_REASON" in
@@ -210,18 +219,24 @@ fi
 ok "Deployment key is valid"
 
 # Extract per-repo SSH deploy keys from the response
-# Response format: {"deploy_keys": {"netentive-saas": "base64...", "netentive-mcp": "base64...", "netentive-core": "base64..."}}
+# Response format: {"deploy_keys": {"netentive-saas": "base64...", ...}}
+# We extract each key with grep/sed (no python3 dependency)
 DEPLOY_KEY_DIR=$(mktemp -d)
-echo "$RESPONSE" | python3 -c "
-import sys, json, base64, os
-data = json.load(sys.stdin)
-keys = data.get('deploy_keys', {})
-for repo, b64key in keys.items():
-    key_path = os.path.join('$DEPLOY_KEY_DIR', repo + '.key')
-    with open(key_path, 'wb') as f:
-        f.write(base64.b64decode(b64key))
-    os.chmod(key_path, 0o600)
-" 2>/dev/null
+
+extract_repo_key() {
+    local repo="$1"
+    # Match "repo": "base64value" in the JSON response
+    local b64val
+    b64val=$(echo "$RESPONSE" | grep -o "\"${repo}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | sed "s/.*:.*\"\([^\"]*\)\"/\1/" | head -1)
+    if [[ -n "$b64val" ]]; then
+        echo "$b64val" | base64 -d > "$DEPLOY_KEY_DIR/${repo}.key"
+        chmod 600 "$DEPLOY_KEY_DIR/${repo}.key"
+    fi
+}
+
+extract_repo_key "netentive-saas"
+extract_repo_key "netentive-mcp"
+extract_repo_key "netentive-core"
 
 # Verify we got keys for all 3 repos
 for repo in netentive-saas netentive-mcp netentive-core; do
@@ -250,8 +265,14 @@ trap cleanup_deploy_keys EXIT INT TERM ERR
 
 ok "SSH deploy keys installed (${DEPLOY_KEY_DIR})"
 
-# Show expiry if present
-KEY_EXPIRES=$(echo "$RESPONSE" | python3 -c "import sys,json; v=json.load(sys.stdin).get('expires_at',''); print(v if v else 'n/a')" 2>/dev/null || echo "n/a")
+# Show expiry if present (extract with grep/sed — no python3 dependency)
+KEY_EXPIRES=$(echo "$RESPONSE" | grep -o '"expires_at"[[:space:]]*:[[:space:]]*null' | head -1)
+if [[ "$KEY_EXPIRES" == *null* ]]; then
+    KEY_EXPIRES="never"
+else
+    KEY_EXPIRES=$(echo "$RESPONSE" | grep -o '"expires_at"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*:.*"\([^"]*\)"/\1/' | head -1)
+    KEY_EXPIRES="${KEY_EXPIRES:-n/a}"
+fi
 info "Key expires: ${KEY_EXPIRES}"
 
 # ==================================================================
