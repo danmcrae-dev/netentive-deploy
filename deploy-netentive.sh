@@ -505,8 +505,8 @@ ok "Database migrations complete"
 # ==================================================================
 title "Step 9: Building and starting MCP"
 
-mkdir -p "$INSTALL_DIR/netentive-mcp/data"
-mkdir -p "$HOME/.ssh/netentive_agents"
+mkdir -p "$INSTALL_DIR/netentive-mcp/data" 2>/dev/null || true
+mkdir -p "$HOME/.ssh/netentive_agents" 2>/dev/null || true
 
 info "Building MCP images (this takes 2-5 minutes)..."
 cd "$INSTALL_DIR/netentive-mcp"
