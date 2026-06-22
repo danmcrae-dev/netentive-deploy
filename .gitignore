@@ -20,3 +20,8 @@ Thumbs.db
 
 # Local test artifacts
 test-output/
+
+# Key server local data and env
+key-server/data/
+key-server/.env
+key-server/__pycache__/

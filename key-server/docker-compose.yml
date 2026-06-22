@@ -1,0 +1,11 @@
+services:
+  key-server:
+    build: .
+    ports:
+      - "7443:7443"
+    volumes:
+      - ./data:/data
+    env_file:
+      - .env
+    restart: unless-stopped
+    network_mode: host

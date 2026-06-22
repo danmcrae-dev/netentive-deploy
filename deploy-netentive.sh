@@ -9,16 +9,45 @@ set -euo pipefail
 #
 # Requirements: macOS with Homebrew (brew.sh), 8GB+ RAM
 #
-# Usage:
-#   ./deploy-netentive.sh [INSTALL_DIR]
+# Usage: curl -fsSL https://raw.githubusercontent.com/danmcrae-dev/netentive-deploy/main/deploy-netentive.sh | bash -s -- --key NET-XXXX-XXXX-XXXX
+# Or:   ./deploy-netentive.sh --key NET-XXXX-XXXX-XXXX
 #
-# Default install dir: ~/netentive
+# Optional flags:
+#   --key NET-XXXX-XXXX-XXXX   Deployment key (required)
+#   --key-server URL           Key server URL (default: https://keys.netentive.io)
+#   --install-dir PATH         Install directory (default: ~/netentive)
+#
+# Env vars:
+#   KEY_SERVER_URL             Override key server URL
+#   COLIMA_CPU, COLIMA_MEMORY, COLIMA_DISK  Colima VM sizing
 # ==================================================================
 
-INSTALL_DIR="${1:-$HOME/netentive}"
-REPO_SAAS="https://github.com/danmcrae-dev/netentive-saas.git"
-REPO_MCP="https://github.com/danmcrae-dev/netentive-mcp.git"
-REPO_CORE="https://github.com/danmcrae-dev/netentive-core.git"
+# ------------------------------------------------------------------
+# Parse command-line arguments (must happen before anything else)
+# ------------------------------------------------------------------
+LICENSE_KEY=""
+KEY_SERVER_URL="${KEY_SERVER_URL:-https://keys.netentive.io}"
+INSTALL_DIR="$HOME/netentive"
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --key) LICENSE_KEY="$2"; shift 2 ;;
+    --key-server) KEY_SERVER_URL="$2"; shift 2 ;;
+    --install-dir) INSTALL_DIR="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [[ -z "$LICENSE_KEY" ]]; then
+  echo "ERROR: Deployment key required."
+  echo "Usage: curl -fsSL https://raw.githubusercontent.com/danmcrae-dev/netentive-deploy/main/deploy-netentive.sh | bash -s -- --key NET-XXXX-XXXX-XXXX"
+  echo "Contact support@netentive.io to purchase a deployment key."
+  exit 1
+fi
+
+REPO_SAAS="git@github.com:danmcrae-dev/netentive-saas.git"
+REPO_MCP="git@github.com:danmcrae-dev/netentive-mcp.git"
+REPO_CORE="git@github.com:danmcrae-dev/netentive-core.git"
 SAAS_PORT=8000
 MCP_PORT=8443
 
@@ -140,9 +169,86 @@ esac
 ok "Architecture: ${ARCH_LABEL}"
 
 # ==================================================================
-# Step 4: Clone repos
+# Step 4: Validate deployment key & obtain SSH deploy key
 # ==================================================================
-title "Step 4: Cloning repositories"
+title "Step 4: Validating deployment key"
+
+info "Contacting key server: ${KEY_SERVER_URL}"
+info "Hostname: $(hostname)"
+
+DEPLOY_KEY_FILE=""
+DEPLOY_KEY_BASE64=""
+
+# Build JSON body safely using Python to avoid injection via special chars
+JSON_BODY=$(python3 -c "import json,sys,socket; print(json.dumps({'key': sys.argv[1], 'hostname': socket.gethostname()}))" "$LICENSE_KEY" 2>/dev/null || echo "{\"key\": \"${LICENSE_KEY}\"}")
+
+RESPONSE=$(curl -sf -X POST "${KEY_SERVER_URL}/v1/deploy-key/redeem" \
+  -H "Content-Type: application/json" \
+  -d "$JSON_BODY" 2>&1) || {
+    err "Failed to contact key server at ${KEY_SERVER_URL}"
+    err "Check your network connection and that the key server is reachable."
+    exit 1
+}
+
+# Parse JSON response — valid flag
+KEY_VALID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('valid',''))" 2>/dev/null || echo "")
+
+if [[ "$KEY_VALID" != "true" ]]; then
+    KEY_REASON=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
+    err "Deployment key validation failed."
+    err "Reason: ${KEY_REASON}"
+    case "$KEY_REASON" in
+        invalid)   err "The key is not recognized. Check for typos." ;;
+        expired)   err "The key has expired. Contact support@netentive.io to renew." ;;
+        revoked)   err "The key has been revoked. Contact support@netentive.io." ;;
+        max_installs) err "The key has reached its maximum number of installations." ;;
+        *)         err "Unexpected response from key server." ;;
+    esac
+    exit 1
+fi
+
+ok "Deployment key is valid"
+
+# Extract the base64-encoded SSH deploy key
+DEPLOY_KEY_BASE64=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('deploy_key_base64',''))" 2>/dev/null || echo "")
+
+if [[ -z "$DEPLOY_KEY_BASE64" ]]; then
+    err "Key server returned valid=true but no deploy_key_base64 field."
+    exit 1
+fi
+
+# Write the deploy key to a temp file and configure git to use it
+DEPLOY_KEY_FILE=$(mktemp)
+echo "$DEPLOY_KEY_BASE64" | base64 -d > "$DEPLOY_KEY_FILE"
+chmod 600 "$DEPLOY_KEY_FILE"
+
+# Pin GitHub's SSH host key to prevent MITM attacks
+KNOWN_HOSTS_FILE=$(mktemp)
+ssh-keyscan -t ed25519 github.com >> "$KNOWN_HOSTS_FILE" 2>/dev/null
+export GIT_SSH_COMMAND="ssh -i $DEPLOY_KEY_FILE -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS_FILE"
+
+# Guarantee cleanup of deploy key and known_hosts on any exit
+cleanup_deploy_key() {
+    if [[ -n "$DEPLOY_KEY_FILE" && -f "$DEPLOY_KEY_FILE" ]]; then
+        rm -f "$DEPLOY_KEY_FILE"
+    fi
+    if [[ -n "$KNOWN_HOSTS_FILE" && -f "$KNOWN_HOSTS_FILE" ]]; then
+        rm -f "$KNOWN_HOSTS_FILE"
+    fi
+    unset GIT_SSH_COMMAND
+}
+trap cleanup_deploy_key EXIT INT TERM ERR
+
+ok "SSH deploy key installed (temp file: ${DEPLOY_KEY_FILE})"
+
+# Show expiry if present
+KEY_EXPIRES=$(echo "$RESPONSE" | python3 -c "import sys,json; v=json.load(sys.stdin).get('expires_at',''); print(v if v else 'n/a')" 2>/dev/null || echo "n/a")
+info "Key expires: ${KEY_EXPIRES}"
+
+# ==================================================================
+# Step 5: Clone repos
+# ==================================================================
+title "Step 5: Cloning repositories"
 
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
@@ -163,10 +269,19 @@ clone_repo "netentive-saas" "$REPO_SAAS"
 clone_repo "netentive-mcp"  "$REPO_MCP"
 clone_repo "netentive-core" "$REPO_CORE"
 
+# Remove the deploy key now that cloning is done
+rm -f "$DEPLOY_KEY_FILE"
+rm -f "$KNOWN_HOSTS_FILE"
+unset GIT_SSH_COMMAND
+trap - EXIT INT TERM ERR
+DEPLOY_KEY_FILE=""
+KNOWN_HOSTS_FILE=""
+ok "SSH deploy key removed from disk"
+
 # ==================================================================
-# Step 5: Generate secrets
+# Step 6: Generate secrets
 # ==================================================================
-title "Step 5: Generating configuration"
+title "Step 6: Generating configuration"
 
 generate_fernet_key() {
     python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>/dev/null || \
@@ -213,9 +328,9 @@ HOST_IP="$(detect_host_ip)"
 info "Detected host IP: ${HOST_IP}"
 
 # ==================================================================
-# Step 6: Write .env files
+# Step 7: Write .env files
 # ==================================================================
-title "Step 6: Writing configuration"
+title "Step 7: Writing configuration"
 
 info "Writing SaaS .env..."
 SAAS_ENV="$INSTALL_DIR/netentive-saas/.env"
@@ -272,9 +387,9 @@ MCP_ENV="$INSTALL_DIR/netentive-mcp/.env"
 ok "MCP .env written"
 
 # ==================================================================
-# Step 7: Build and start SaaS
+# Step 8: Build and start SaaS
 # ==================================================================
-title "Step 7: Building and starting SaaS"
+title "Step 8: Building and starting SaaS"
 
 # Colima supports network_mode: host, so we use the original compose files
 # directly — no patching needed.
@@ -301,9 +416,9 @@ docker compose exec -T api python -m alembic upgrade head 2>&1 | tail -5
 ok "Database migrations complete"
 
 # ==================================================================
-# Step 8: Build and start MCP
+# Step 9: Build and start MCP
 # ==================================================================
-title "Step 8: Building and starting MCP"
+title "Step 9: Building and starting MCP"
 
 mkdir -p "$INSTALL_DIR/netentive-mcp/data"
 mkdir -p "$HOME/.ssh/netentive_agents"
@@ -315,9 +430,9 @@ docker compose up -d --build 2>&1 | tail -20
 ok "MCP containers started"
 
 # ==================================================================
-# Step 9: Health checks
+# Step 10: Health checks
 # ==================================================================
-title "Step 9: Health checks"
+title "Step 10: Health checks"
 
 wait_for_health() {
     local url="$1" name="$2" max_tries="${3:-30}"
@@ -339,9 +454,9 @@ wait_for_health "http://localhost:${SAAS_PORT}/api/v1/status" "SaaS API" 30
 wait_for_health "http://localhost:${MCP_PORT}/health" "MCP Server" 30
 
 # ==================================================================
-# Step 10: Show status + summary
+# Step 11: Show status + summary
 # ==================================================================
-title "Step 10: Deployment status"
+title "Step 11: Deployment status"
 
 echo ""
 echo "  SaaS containers:"
