@@ -209,37 +209,46 @@ fi
 
 ok "Deployment key is valid"
 
-# Extract the base64-encoded SSH deploy key
-DEPLOY_KEY_BASE64=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('deploy_key_base64',''))" 2>/dev/null || echo "")
+# Extract per-repo SSH deploy keys from the response
+# Response format: {"deploy_keys": {"netentive-saas": "base64...", "netentive-mcp": "base64...", "netentive-core": "base64..."}}
+DEPLOY_KEY_DIR=$(mktemp -d)
+echo "$RESPONSE" | python3 -c "
+import sys, json, base64, os
+data = json.load(sys.stdin)
+keys = data.get('deploy_keys', {})
+for repo, b64key in keys.items():
+    key_path = os.path.join('$DEPLOY_KEY_DIR', repo + '.key')
+    with open(key_path, 'wb') as f:
+        f.write(base64.b64decode(b64key))
+    os.chmod(key_path, 0o600)
+" 2>/dev/null
 
-if [[ -z "$DEPLOY_KEY_BASE64" ]]; then
-    err "Key server returned valid=true but no deploy_key_base64 field."
-    exit 1
-fi
-
-# Write the deploy key to a temp file and configure git to use it
-DEPLOY_KEY_FILE=$(mktemp)
-echo "$DEPLOY_KEY_BASE64" | base64 -d > "$DEPLOY_KEY_FILE"
-chmod 600 "$DEPLOY_KEY_FILE"
+# Verify we got keys for all 3 repos
+for repo in netentive-saas netentive-mcp netentive-core; do
+    if [[ ! -f "$DEPLOY_KEY_DIR/${repo}.key" ]]; then
+        err "Key server did not return a deploy key for ${repo}."
+        rm -rf "$DEPLOY_KEY_DIR"
+        exit 1
+    fi
+done
 
 # Pin GitHub's SSH host key to prevent MITM attacks
 KNOWN_HOSTS_FILE=$(mktemp)
 ssh-keyscan -t ed25519 github.com >> "$KNOWN_HOSTS_FILE" 2>/dev/null
-export GIT_SSH_COMMAND="ssh -i $DEPLOY_KEY_FILE -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS_FILE"
 
-# Guarantee cleanup of deploy key and known_hosts on any exit
-cleanup_deploy_key() {
-    if [[ -n "$DEPLOY_KEY_FILE" && -f "$DEPLOY_KEY_FILE" ]]; then
-        rm -f "$DEPLOY_KEY_FILE"
+# Guarantee cleanup of deploy keys and known_hosts on any exit
+cleanup_deploy_keys() {
+    if [[ -n "$DEPLOY_KEY_DIR" && -d "$DEPLOY_KEY_DIR" ]]; then
+        rm -rf "$DEPLOY_KEY_DIR"
     fi
     if [[ -n "$KNOWN_HOSTS_FILE" && -f "$KNOWN_HOSTS_FILE" ]]; then
         rm -f "$KNOWN_HOSTS_FILE"
     fi
     unset GIT_SSH_COMMAND
 }
-trap cleanup_deploy_key EXIT INT TERM ERR
+trap cleanup_deploy_keys EXIT INT TERM ERR
 
-ok "SSH deploy key installed (temp file: ${DEPLOY_KEY_FILE})"
+ok "SSH deploy keys installed (${DEPLOY_KEY_DIR})"
 
 # Show expiry if present
 KEY_EXPIRES=$(echo "$RESPONSE" | python3 -c "import sys,json; v=json.load(sys.stdin).get('expires_at',''); print(v if v else 'n/a')" 2>/dev/null || echo "n/a")
@@ -255,6 +264,8 @@ cd "$INSTALL_DIR"
 
 clone_repo() {
     local name="$1" url="$2"
+    local key_file="$DEPLOY_KEY_DIR/${name}.key"
+    export GIT_SSH_COMMAND="ssh -i ${key_file} -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS_FILE"
     if [ -d "$name" ]; then
         info "$name/ already exists — pulling latest"
         (cd "$name" && git pull --ff-only) || warn "$name pull failed, continuing with existing"
@@ -269,14 +280,14 @@ clone_repo "netentive-saas" "$REPO_SAAS"
 clone_repo "netentive-mcp"  "$REPO_MCP"
 clone_repo "netentive-core" "$REPO_CORE"
 
-# Remove the deploy key now that cloning is done
-rm -f "$DEPLOY_KEY_FILE"
+# Remove the deploy keys now that cloning is done
+rm -rf "$DEPLOY_KEY_DIR"
 rm -f "$KNOWN_HOSTS_FILE"
 unset GIT_SSH_COMMAND
 trap - EXIT INT TERM ERR
-DEPLOY_KEY_FILE=""
+DEPLOY_KEY_DIR=""
 KNOWN_HOSTS_FILE=""
-ok "SSH deploy key removed from disk"
+ok "SSH deploy keys removed from disk"
 
 # ==================================================================
 # Step 6: Generate secrets

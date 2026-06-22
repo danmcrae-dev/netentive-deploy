@@ -33,6 +33,19 @@ from pydantic import BaseModel, Field
 DB_PATH = os.environ.get("DB_PATH", "/data/keys.db")
 RATE_LIMIT_PER_HOUR = int(os.environ.get("RATE_LIMIT_PER_HOUR", "5"))
 DEPLOY_SSH_KEY_BASE64 = os.environ.get("DEPLOY_SSH_KEY_BASE64", "")
+
+# Per-repo SSH deploy keys (base64-encoded private keys).
+# GitHub requires unique SSH keys per repo, so we use one key per repo.
+# Env vars: DEPLOY_KEY_SAAS_BASE64, DEPLOY_KEY_MCP_BASE64, DEPLOY_KEY_CORE_BASE64
+# Falls back to DEPLOY_SSH_KEY_BASE64 for backward compatibility (single-key mode).
+DEPLOY_KEYS: dict[str, str] = {}
+for _repo in ("netentive-saas", "netentive-mcp", "netentive-core"):
+    _env_var = f"DEPLOY_KEY_{_repo.split('-')[1].upper()}_BASE64"
+    _val = os.environ.get(_env_var, "")
+    if _val:
+        DEPLOY_KEYS[_repo] = _val
+    elif DEPLOY_SSH_KEY_BASE64:
+        DEPLOY_KEYS[_repo] = DEPLOY_SSH_KEY_BASE64
 # Comma-separated list of trusted reverse proxy IPs for X-Forwarded-For.
 # If empty, X-Forwarded-For is ignored and the direct connection IP is used.
 TRUSTED_PROXIES = set(
@@ -199,7 +212,7 @@ def _build_success_response(row: sqlite3.Row) -> dict:
     """Build the success response payload."""
     return {
         "valid": True,
-        "deploy_key_base64": DEPLOY_SSH_KEY_BASE64,
+        "deploy_keys": DEPLOY_KEYS,  # {"netentive-saas": "base64key", "netentive-mcp": "base64key", ...}
         "repos": REPOS,
         "github_org": GITHUB_ORG,
         "expires_at": row["expires_at"],
