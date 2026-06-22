@@ -387,10 +387,12 @@ MCP_SERVICE_PASSWORD="$(generate_password)"
 MCP_SECRET_KEY="$(generate_password)"
 VAULT_KEY="$(generate_fernet_key)"
 SECRET_KEY="$(generate_password)"
+ADMIN_PASSWORD="$(openssl rand -base64 12 2>/dev/null | tr -d '/+=' | cut -c1-16 || python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))')"
 
 info "Generated DB_PASSWORD (${#DB_PASSWORD} chars)"
 info "Generated MCP_API_KEY (${#MCP_API_KEY} chars)"
 info "Generated VAULT_KEY (${#VAULT_KEY} chars)"
+info "Generated ADMIN_PASSWORD (${#ADMIN_PASSWORD} chars)"
 
 # Detect host IP for MCP agent registration
 detect_host_ip() {
@@ -456,7 +458,12 @@ SAAS_ENV="$INSTALL_DIR/netentive-saas/.env"
     echo ""
     echo "# Frontend"
     echo "FRONTEND_URL=http://localhost:${SAAS_PORT}"
+    echo ""
+    echo "# Default admin (seed_admin.py reads these on first boot)"
+    echo "ADMIN_EMAIL=admin@netentive.local"
+    echo "ADMIN_PASSWORD=${ADMIN_PASSWORD}"
 } > "$SAAS_ENV"
+chmod 600 "$SAAS_ENV"
 ok "SaaS .env written"
 
 info "Writing MCP .env..."
@@ -489,6 +496,7 @@ MCP_ENV="$INSTALL_DIR/netentive-mcp/.env"
     echo "DEVICE_USER=admin"
     echo "DEVICE_PASS="
 } > "$MCP_ENV"
+chmod 600 "$MCP_ENV"
 ok "MCP .env written"
 
 # ==================================================================
@@ -547,6 +555,36 @@ if [[ $MIGRATE_EXIT -ne 0 ]]; then
     exit 1
 fi
 ok "Database migrations complete"
+
+# ==================================================================
+# Step 8b: Seed default admin user
+# ==================================================================
+info "Seeding default admin user..."
+
+# Ensure ADMIN_EMAIL / ADMIN_PASSWORD are present in the container env.
+# The .env file already contains them (written in Step 7), and
+# `set -a; source .env` above exports them into the shell, so
+# `docker compose exec` inherits them.  Run the seeder and capture output.
+SEED_OUTPUT=""
+set +e
+SEED_OUTPUT="$(docker compose exec -T api python /app/backend/seed_admin.py 2>&1)"
+SEED_EXIT=$?
+set -e
+echo "$SEED_OUTPUT"
+if [[ $SEED_EXIT -ne 0 ]]; then
+    err "Admin seed failed (exit code $SEED_EXIT)."
+    err "SaaS API logs (last 20 lines):"
+    docker compose logs --tail 20 api 2>&1
+    exit 1
+fi
+
+# Parse credentials from seeder output (ADMIN_EMAIL=... / ADMIN_PASSWORD=...)
+SEED_ADMIN_EMAIL="$(echo "$SEED_OUTPUT" | grep -m1 '^ADMIN_EMAIL=' | cut -d= -f2-)"
+SEED_ADMIN_PASSWORD="$(echo "$SEED_OUTPUT" | grep -m1 '^ADMIN_PASSWORD=' | cut -d= -f2-)"
+# Fall back to .env values if seeder didn't print them (e.g. users already existed)
+SEED_ADMIN_EMAIL="${SEED_ADMIN_EMAIL:-$ADMIN_EMAIL}"
+SEED_ADMIN_PASSWORD="${SEED_ADMIN_PASSWORD:-$ADMIN_PASSWORD}"
+ok "Admin seed complete"
 
 # ==================================================================
 # Step 9: Build and start MCP
@@ -621,9 +659,18 @@ echo "                      ${INSTALL_DIR}/netentive-mcp/.env"
 echo ""
 echo "  First-time setup:"
 echo "    1. Open http://localhost:${SAAS_PORT} in your browser"
-echo "    2. Create an admin account (first user is auto-admin)"
+echo "    2. Log in with the admin credentials below"
 echo "    3. Add your managed devices in the Devices page"
 echo "    4. Credentials are synced to the MCP agent automatically"
+echo ""
+echo "  +---------------------------------------------------------------+"
+echo "  |  ${BOLD}Default admin credentials (CHANGE IMMEDIATELY!)${NC}        |"
+echo "  +---------------------------------------------------------------+"
+echo "  |  Email:    ${SEED_ADMIN_EMAIL}"
+echo "  |  Password: ${SEED_ADMIN_PASSWORD}"
+echo "  +---------------------------------------------------------------+"
+echo ""
+warn "Change the admin password immediately after first login!"
 echo ""
 echo "  To stop:"
 echo "    cd ${INSTALL_DIR}/netentive-saas/deployment && docker compose down"
