@@ -181,36 +181,22 @@ colima ssh < /dev/null -- sudo sh -c 'sysctl -w net.ipv6.conf.all.disable_ipv6=1
 set -e
 ok "IPv6 disabled in Colima VM"
 
-# Test that docker build can fetch metadata now (the real failure point)
-info "Verifying Docker Build metadata resolution..."
-set +e
-docker build --no-cache -f- -t netentive-build-test:latest . <<'DOCKERFILE' 2>/dev/null
-FROM python:3.11-slim
-RUN echo "buildkit-ok"
-DOCKERFILE
-BUILD_EXIT=$?
-set -e
-if [[ $BUILD_EXIT -eq 0 ]]; then
-    docker rmi netentive-build-test:latest 2>/dev/null || true
-    ok "Docker build verified (BuildKit + IPv4)"
-else
-    warn "BuildKit test failed — disabling BuildKit (using legacy builder)"
-    export DOCKER_BUILDKIT=0
-    set +e
-    docker build --no-cache -f- -t netentive-build-test:latest . <<'DOCKERFILE2' 2>/dev/null
-FROM python:3.11-slim
-RUN echo "legacy-ok"
-DOCKERFILE2
-    LEGACY_EXIT=$?
-    set -e
-    if [[ $LEGACY_EXIT -eq 0 ]]; then
-        docker rmi netentive-build-test:latest 2>/dev/null || true
-        ok "Docker build verified (legacy builder)"
+# Pre-pull all base images that docker build will need.
+# docker pull works (uses daemon networking) but docker build's BuildKit
+# can fail fetching auth.docker.io tokens even with IPv6 disabled (cached state).
+# If all base images are in the local cache, BuildKit won't need to contact
+# the registry at all — the build succeeds from cache.
+info "Pre-pulling base images (avoids BuildKit registry auth issues)..."
+BASE_IMAGES="python:3.11-slim node:20-slim node:20-alpine nginx:alpine"
+for img in $BASE_IMAGES; do
+    info "  Pulling $img..."
+    if docker pull "$img" 2>/dev/null; then
+        ok "  $img ready"
     else
-        err "Docker build cannot fetch base images. Try: colima restart"
-        exit 1
+        warn "  Failed to pull $img — build may fail. Will retry during build."
     fi
-fi
+done
+ok "Base images pre-pulled"
 
 # Verify Docker daemon is responsive
 if ! docker info &>/dev/null; then
