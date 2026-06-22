@@ -162,9 +162,11 @@ ok "Docker Hub connectivity verified (docker pull)"
 
 # Disable IPv6 inside Colima VM — Docker BuildKit prefers IPv6 for auth.docker.io
 # which fails on some Mac networks. Forcing IPv4 fixes "socket is not connected" errors.
+# IMPORTANT: redirect stdin from /dev/null — colima ssh reads stdin and would
+# consume the rest of the piped script, killing it silently.
 info "Disabling IPv6 in Colima VM (fixes Docker BuildKit auth failures)..."
 set +e
-colima ssh -- sudo sh -c 'sysctl -w net.ipv6.conf.all.disable_ipv6=1; sysctl -w net.ipv6.conf.default.disable_ipv6=1' 2>/dev/null
+colima ssh < /dev/null -- sudo sh -c 'sysctl -w net.ipv6.conf.all.disable_ipv6=1; sysctl -w net.ipv6.conf.default.disable_ipv6=1' 2>/dev/null
 set -e
 ok "IPv6 disabled in Colima VM"
 
