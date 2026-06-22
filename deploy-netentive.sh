@@ -241,13 +241,17 @@ else
     JSON_BODY="{\"key\": \"${LICENSE_KEY}\", \"hostname\": \"$(hostname)\"}"
 fi
 
-RESPONSE=$(curl -sf -X POST "${KEY_SERVER_URL}/v1/deploy-key/redeem" \
+# Use -s (silent progress) but NOT -f (don't fail on HTTP error codes)
+# We want to see the actual JSON response even if the server returns an error code
+RESPONSE=$(curl -s -X POST "${KEY_SERVER_URL}/v1/deploy-key/redeem" \
   -H "Content-Type: application/json" \
-  -d "$JSON_BODY" 2>&1) || {
+  -d "$JSON_BODY" --connect-timeout 10 2>&1)
+
+if [[ -z "$RESPONSE" ]]; then
     err "Failed to contact key server at ${KEY_SERVER_URL}"
-    err "Check your network connection and that the key server is reachable."
+    err "No response received. Check your network connection."
     exit 1
-}
+fi
 
 # Parse JSON response using grep/sed (no python3 dependency)
 # Response format: {"valid": true, ...} or {"valid": false, "reason": "invalid", ...}
