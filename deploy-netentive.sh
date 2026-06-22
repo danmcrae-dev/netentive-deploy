@@ -27,7 +27,7 @@ set -euo pipefail
 # so stdin is free for commands like colima ssh that read stdin.
 # ------------------------------------------------------------------
 if [[ ! -t 0 && "${0}" == "bash" ]]; then
-    TMP_SCRIPT="$(mktemp /tmp/netentive-deploy.XXXXXX.sh)"
+    TMP_SCRIPT="$(mktemp /tmp/netentive-deploy.XXXXXXXX)"
     cat > "$TMP_SCRIPT"
     chmod +x "$TMP_SCRIPT"
     exec bash "$TMP_SCRIPT" "$@"
