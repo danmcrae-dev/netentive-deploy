@@ -1,0 +1,70 @@
+#!/bin/bash
+# Netentive auto-start script — called by launchd on login
+# Starts Colima + all Docker containers
+
+LOG=/tmp/netentive-startup.log
+NETENTIVE_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+echo "[$(date)] Netentive startup beginning..." >> "$LOG"
+
+# Start Colima if not running
+if ! colima status 2>/dev/null | grep -q "Running"; then
+    echo "[$(date)] Starting Colima..." >> "$LOG"
+    colima start >> "$LOG" 2>&1
+else
+    echo "[$(date)] Colima already running" >> "$LOG"
+fi
+
+# Wait for Docker daemon
+for i in $(seq 1 30); do
+    if docker info &>/dev/null; then
+        echo "[$(date)] Docker daemon ready" >> "$LOG"
+        break
+    fi
+    sleep 2
+done
+
+if ! docker info &>/dev/null; then
+    echo "[$(date)] ERROR: Docker daemon not responding after 60s" >> "$LOG"
+    exit 1
+fi
+
+# Start SaaS containers
+SAAS_DEPLOY="$NETENTIVE_DIR/netentive-saas/deployment"
+if [[ -f "$SAAS_DEPLOY/../.env" ]]; then
+    echo "[$(date)] Starting SaaS containers..." >> "$LOG"
+    cd "$SAAS_DEPLOY"
+    set -a; source ../.env; set +a
+    docker compose up -d >> "$LOG" 2>&1
+else
+    echo "[$(date)] WARN: SaaS .env not found, skipping" >> "$LOG"
+fi
+
+# Start MCP containers
+MCP_DEPLOY="$NETENTIVE_DIR/netentive-mcp/deployment"
+if [[ -f "$MCP_DEPLOY/../.env" ]]; then
+    echo "[$(date)] Starting MCP containers..." >> "$LOG"
+    cd "$MCP_DEPLOY"
+    set -a; source ../.env; set +a
+    docker compose up -d >> "$LOG" 2>&1
+else
+    echo "[$(date)] WARN: MCP .env not found, skipping" >> "$LOG"
+fi
+
+# Wait for health checks
+for i in $(seq 1 30); do
+    SAAS_OK=$(curl -s --connect-timeout 2 http://localhost:8000/api/v1/status 2>/dev/null | grep -o '"status":"healthy"')
+    MCP_OK=$(curl -s --connect-timeout 2 http://localhost:8443/health 2>/dev/null | grep -o '"status":"ok"')
+    if [[ -n "$SAAS_OK" ]]; then
+        echo "[$(date)] SaaS API healthy" >> "$LOG"
+    fi
+    if [[ -n "$MCP_OK" ]]; then
+        echo "[$(date)] MCP server healthy" >> "$LOG"
+    fi
+    if [[ -n "$SAAS_OK" && -n "$MCP_OK" ]]; then
+        break
+    fi
+    sleep 3
+done
+
+echo "[$(date)] Netentive startup complete" >> "$LOG"

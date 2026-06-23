@@ -631,9 +631,36 @@ wait_for_health "http://localhost:${SAAS_PORT}/api/v1/status" "SaaS API" 30
 wait_for_health "http://localhost:${MCP_PORT}/health" "MCP Server" 30
 
 # ==================================================================
-# Step 11: Show status + summary
+# Step 11: Install auto-start on login (launchd)
 # ==================================================================
-title "Step 11: Deployment status"
+title "Step 11: Installing auto-start on login"
+
+DEPLOY_SCRIPTS_DIR="$INSTALL_DIR/netentive-deploy/scripts"
+
+if [[ -f "$DEPLOY_SCRIPTS_DIR/netentive-start.sh" ]]; then
+    info "Copying startup script to ${INSTALL_DIR}/netentive-start.sh"
+    cp "$DEPLOY_SCRIPTS_DIR/netentive-start.sh" "$INSTALL_DIR/netentive-start.sh"
+    chmod +x "$INSTALL_DIR/netentive-start.sh"
+    ok "Startup script installed"
+
+    if [[ -f "$DEPLOY_SCRIPTS_DIR/com.netentive.startup.plist" ]]; then
+        info "Installing launchd agent..."
+        mkdir -p "$HOME/Library/LaunchAgents"
+        sed "s|__HOME__|${HOME}|g" "$DEPLOY_SCRIPTS_DIR/com.netentive.startup.plist" \
+            > "$HOME/Library/LaunchAgents/com.netentive.startup.plist"
+        launchctl load "$HOME/Library/LaunchAgents/com.netentive.startup.plist" 2>/dev/null || true
+        ok "Auto-start installed — Netentive will start automatically on login"
+    else
+        warn "launchd plist template not found, skipping auto-start installation"
+    fi
+else
+    warn "Startup script template not found, skipping auto-start installation"
+fi
+
+# ==================================================================
+# Step 12: Show status + summary
+# ==================================================================
+title "Step 12: Deployment status"
 
 echo ""
 echo "  SaaS containers:"
