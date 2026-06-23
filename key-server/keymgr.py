@@ -121,7 +121,11 @@ def cmd_create(args: argparse.Namespace) -> None:
 
         key = generate_key()
         created_at = utc_now_iso()
-        expires_at = args.expires + "T23:59:59Z" if args.expires else None
+        # Treat "never" (case-insensitive) as no expiry → store NULL.
+        if args.expires and args.expires.strip().lower() != "never":
+            expires_at = args.expires + "T23:59:59Z"
+        else:
+            expires_at = None
 
         conn.execute(
             """INSERT INTO deploy_keys
@@ -292,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     # create
     p_create = sub.add_parser("create", help="Generate a new license key")
     p_create.add_argument("--email", required=True, help="Customer email")
-    p_create.add_argument("--expires", default=None, help="Expiry date (YYYY-MM-DD)")
+    p_create.add_argument("--expires", default=None, help="Expiry date (YYYY-MM-DD) or 'never' for no expiry")
     p_create.add_argument("--max-installs", type=int, default=3, help="Max install count (default: 3)")
     p_create.add_argument("--notes", default=None, help="Free-form notes")
     p_create.set_defaults(func=cmd_create)

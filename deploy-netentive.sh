@@ -306,6 +306,14 @@ fi
 # ==================================================================
 title "Step 2: Installing Docker CE"
 
+# Check if Docker CE + compose plugin are already installed.
+# If so, skip the entire apt-get installation block to avoid spurious sudo
+# password prompts on machines where Docker is already present.
+if command -v docker &>/dev/null && docker compose version &>/dev/null; then
+    ok "Docker CE already installed: $(docker --version)"
+    ok "Compose: $(docker compose version 2>/dev/null | head -1)"
+else
+
 info "Installing prerequisite packages..."
 sudo apt-get update
 sudo apt-get install -y ca-certificates curl gnupg
@@ -343,14 +351,20 @@ if ! docker compose version &>/dev/null; then
 fi
 ok "Compose: $(docker compose version 2>/dev/null | head -1)"
 
+fi # end Docker-already-installed check
+
 # ==================================================================
 # Step 3: Start Docker service
 # ==================================================================
 title "Step 3: Starting Docker service"
 
-info "Starting Docker service..."
-sudo systemctl start docker
-ok "Docker service started"
+if systemctl is-active --quiet docker; then
+    ok "Docker service is already running"
+else
+    info "Starting Docker service..."
+    sudo systemctl start docker
+    ok "Docker service started"
+fi
 
 # Pre-pull base images (shared)
 info "Pre-pulling base images..."
