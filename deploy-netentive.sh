@@ -242,25 +242,20 @@ colima ssh < /dev/null -- sudo sh -c 'sysctl -w net.ipv6.conf.all.disable_ipv6=1
 set -e
 ok "IPv6 disabled in Colima VM"
 
-# Add route to the physical LAN so containers can reach remote hosts
-# (e.g. a remote Ollama server at 192.168.12.115).
+# Add routes so containers can reach private network hosts (MCP agent SSH,
+# remote Ollama servers, network devices on any subnet).
 # Colima VMs use NAT networking (192.168.5.x / 192.168.64.x) and can't
-# route to the physical LAN (192.168.12.x) by default. This route sends
-# LAN traffic via the Mac host gateway (192.168.64.1 on the col0 interface).
-# Detect the Colima VM's gateway by reading the col0 interface IP.
+# route to private LANs by default. We add routes for ALL private network
+# ranges via the Mac host gateway on the col0 interface — the Mac can
+# reach any network it has a route to, so this covers multi-subnet setups.
 set +e
 COLIMA_GATEWAY=$(colima ssh < /dev/null -- ip route show default 2>/dev/null | grep col0 | awk '{print $3}' | head -1)
 if [ -n "$COLIMA_GATEWAY" ]; then
-    # Detect the LAN subnet from the Mac's primary network interface
-    LAN_IFACE=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
-    if [ -n "$LAN_IFACE" ]; then
-        LAN_NET=$(ifconfig "$LAN_IFACE" 2>/dev/null | awk '/inet /{split($2,a,"."); print a[1]"."a[2]".0.0/16"}')
-        if [ -n "$LAN_NET" ]; then
-            info "Adding Colima VM route to LAN subnet $LAN_NET via $COLIMA_GATEWAY..."
-            colima ssh < /dev/null -- sudo ip route add "$LAN_NET" via "$COLIMA_GATEWAY" dev col0 2>/dev/null
-            ok "Colima VM can now reach LAN hosts"
-        fi
-    fi
+    info "Adding Colima VM routes to all private networks via $COLIMA_GATEWAY..."
+    for CIDR in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+        colima ssh < /dev/null -- sudo ip route add "$CIDR" via "$COLIMA_GATEWAY" dev col0 2>/dev/null
+    done
+    ok "Colima VM can now reach all private network hosts (10.x, 172.16-31.x, 192.168.x)"
 fi
 set -e
 

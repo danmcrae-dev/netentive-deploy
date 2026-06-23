@@ -16,17 +16,14 @@ if [[ "$OS_TYPE" == "Darwin" ]]; then
     else
         echo "[$(date)] Colima already running" >> "$LOG"
     fi
-    # Add LAN route so containers can reach remote hosts (e.g. remote Ollama)
+    # Add routes to all private networks so containers can reach remote hosts
+    # (MCP agent SSH to devices, remote Ollama, multi-subset networks)
     COLIMA_GW=$(colima ssh < /dev/null -- ip route show default 2>/dev/null | grep col0 | awk '{print $3}' | head -1)
     if [ -n "$COLIMA_GW" ]; then
-        LAN_IF=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
-        if [ -n "$LAN_IF" ]; then
-            LAN_NET=$(ifconfig "$LAN_IF" 2>/dev/null | awk '/inet /{split($2,a,"."); print a[1]"."a[2]".0.0/16"}')
-            if [ -n "$LAN_NET" ]; then
-                colima ssh < /dev/null -- sudo ip route add "$LAN_NET" via "$COLIMA_GW" dev col0 2>/dev/null
-                echo "[$(date)] Colima LAN route added: $LAN_NET via $COLIMA_GW" >> "$LOG"
-            fi
-        fi
+        for CIDR in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+            colima ssh < /dev/null -- sudo ip route add "$CIDR" via "$COLIMA_GW" dev col0 2>/dev/null
+        done
+        echo "[$(date)] Colima private network routes added via $COLIMA_GW" >> "$LOG"
     fi
 elif [[ "$OS_TYPE" == "Linux" ]] && ! grep -qi microsoft /proc/version 2>/dev/null; then
     # Native Linux: ensure Docker service is running
