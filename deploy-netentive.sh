@@ -649,7 +649,14 @@ wait_for_health "http://localhost:${MCP_PORT}/health" "MCP Server" 30
 # ==================================================================
 title "Step 11: Installing auto-start on login"
 
-DEPLOY_SCRIPTS_DIR="$INSTALL_DIR/netentive-deploy/scripts"
+# Clone the deploy repo if not present (needed for scripts/ templates)
+DEPLOY_REPO_DIR="$INSTALL_DIR/netentive-deploy"
+DEPLOY_SCRIPTS_DIR="$DEPLOY_REPO_DIR/scripts"
+
+if [[ ! -d "$DEPLOY_SCRIPTS_DIR" ]]; then
+    info "Cloning deploy repo for auto-start templates..."
+    git clone --depth 1 https://github.com/danmcrae-dev/netentive-deploy.git "$DEPLOY_REPO_DIR" 2>/dev/null || true
+fi
 
 if [[ -f "$DEPLOY_SCRIPTS_DIR/netentive-start.sh" ]]; then
     info "Copying startup script to ${INSTALL_DIR}/netentive-start.sh"
