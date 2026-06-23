@@ -16,6 +16,18 @@ if [[ "$OS_TYPE" == "Darwin" ]]; then
     else
         echo "[$(date)] Colima already running" >> "$LOG"
     fi
+    # Add LAN route so containers can reach remote hosts (e.g. remote Ollama)
+    COLIMA_GW=$(colima ssh < /dev/null -- ip route show default 2>/dev/null | grep col0 | awk '{print $3}' | head -1)
+    if [ -n "$COLIMA_GW" ]; then
+        LAN_IF=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+        if [ -n "$LAN_IF" ]; then
+            LAN_NET=$(ifconfig "$LAN_IF" 2>/dev/null | awk '/inet /{split($2,a,"."); print a[1]"."a[2]".0.0/16"}')
+            if [ -n "$LAN_NET" ]; then
+                colima ssh < /dev/null -- sudo ip route add "$LAN_NET" via "$COLIMA_GW" dev col0 2>/dev/null
+                echo "[$(date)] Colima LAN route added: $LAN_NET via $COLIMA_GW" >> "$LOG"
+            fi
+        fi
+    fi
 elif [[ "$OS_TYPE" == "Linux" ]] && ! grep -qi microsoft /proc/version 2>/dev/null; then
     # Native Linux: ensure Docker service is running
     sudo systemctl start docker 2>/dev/null || true

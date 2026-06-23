@@ -242,6 +242,28 @@ colima ssh < /dev/null -- sudo sh -c 'sysctl -w net.ipv6.conf.all.disable_ipv6=1
 set -e
 ok "IPv6 disabled in Colima VM"
 
+# Add route to the physical LAN so containers can reach remote hosts
+# (e.g. a remote Ollama server at 192.168.12.115).
+# Colima VMs use NAT networking (192.168.5.x / 192.168.64.x) and can't
+# route to the physical LAN (192.168.12.x) by default. This route sends
+# LAN traffic via the Mac host gateway (192.168.64.1 on the col0 interface).
+# Detect the Colima VM's gateway by reading the col0 interface IP.
+set +e
+COLIMA_GATEWAY=$(colima ssh < /dev/null -- ip route show default 2>/dev/null | grep col0 | awk '{print $3}' | head -1)
+if [ -n "$COLIMA_GATEWAY" ]; then
+    # Detect the LAN subnet from the Mac's primary network interface
+    LAN_IFACE=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+    if [ -n "$LAN_IFACE" ]; then
+        LAN_NET=$(ifconfig "$LAN_IFACE" 2>/dev/null | awk '/inet /{split($2,a,"."); print a[1]"."a[2]".0.0/16"}')
+        if [ -n "$LAN_NET" ]; then
+            info "Adding Colima VM route to LAN subnet $LAN_NET via $COLIMA_GATEWAY..."
+            colima ssh < /dev/null -- sudo ip route add "$LAN_NET" via "$COLIMA_GATEWAY" dev col0 2>/dev/null
+            ok "Colima VM can now reach LAN hosts"
+        fi
+    fi
+fi
+set -e
+
 # Pre-pull all base images that docker build will need.
 # docker pull works (uses daemon networking) but docker build's BuildKit
 # can fail fetching auth.docker.io tokens even with IPv6 disabled (cached state).
