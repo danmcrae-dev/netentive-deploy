@@ -1,19 +1,27 @@
 #!/bin/bash
-# Netentive auto-start script — called by launchd on login
-# Starts Colima + all Docker containers
-
+# Netentive auto-start script — called by launchd/systemd/Task Scheduler on login
+# Starts the Docker runtime (platform-specific) + all containers
 LOG=/tmp/netentive-startup.log
 NETENTIVE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "[$(date)] Netentive startup beginning..." >> "$LOG"
 
-# Start Colima if not running
-if ! colima status 2>/dev/null | grep -q "Running"; then
-    echo "[$(date)] Starting Colima..." >> "$LOG"
-    colima start >> "$LOG" 2>&1
-else
-    echo "[$(date)] Colima already running" >> "$LOG"
+# Start Docker runtime based on platform
+OS_TYPE="$(uname -s)"
+if [[ "$OS_TYPE" == "Darwin" ]]; then
+    # macOS: start Colima if not running
+    if ! colima status 2>/dev/null | grep -q "Running"; then
+        echo "[$(date)] Starting Colima..." >> "$LOG"
+        colima start >> "$LOG" 2>&1
+    else
+        echo "[$(date)] Colima already running" >> "$LOG"
+    fi
+elif [[ "$OS_TYPE" == "Linux" ]] && ! grep -qi microsoft /proc/version 2>/dev/null; then
+    # Native Linux: ensure Docker service is running
+    sudo systemctl start docker 2>/dev/null || true
+    echo "[$(date)] Docker service started" >> "$LOG"
 fi
+# WSL2: Docker Desktop handles Docker lifecycle, nothing to do
 
 # Wait for Docker daemon
 for i in $(seq 1 30); do

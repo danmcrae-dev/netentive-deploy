@@ -2,12 +2,15 @@
 set -euo pipefail
 
 # ==================================================================
-# Netentive One-Command Deploy Script (Colima edition)
+# Netentive One-Command Deploy Script (multi-platform edition)
 #
-# Installs Colima + Docker via Homebrew, clones all repos,
-# generates secrets, builds and starts the full platform.
+# Supports:
+#   - macOS  (Colima + Docker via Homebrew)
+#   - Linux  (Docker CE via apt-get, native)
+#   - WSL2   (Docker Desktop with WSL2 backend)
 #
-# Requirements: macOS with Homebrew (brew.sh), 8GB+ RAM
+# Clones all repos, generates secrets, builds and starts the
+# full platform (SaaS + MCP + Agent + PostgreSQL + Redis).
 #
 # Usage: curl -fsSL https://raw.githubusercontent.com/danmcrae-dev/netentive-deploy/main/deploy-netentive.sh | bash -s -- --key NET-XXXX-XXXX-XXXX
 # Or:   ./deploy-netentive.sh --key NET-XXXX-XXXX-XXXX
@@ -19,7 +22,7 @@ set -euo pipefail
 #
 # Env vars:
 #   KEY_SERVER_URL             Override key server URL
-#   COLIMA_CPU, COLIMA_MEMORY, COLIMA_DISK  Colima VM sizing
+#   COLIMA_CPU, COLIMA_MEMORY, COLIMA_DISK  Colima VM sizing (macOS only)
 # ==================================================================
 
 # ------------------------------------------------------------------
@@ -56,13 +59,29 @@ if [[ -z "$LICENSE_KEY" ]]; then
   exit 1
 fi
 
+# ------------------------------------------------------------------
+# Detect platform (mac / linux / wsl)
+# ------------------------------------------------------------------
+OS_TYPE="$(uname -s)"
+case "$OS_TYPE" in
+    Darwin) PLATFORM="mac" ;;
+    Linux)
+        if grep -qi microsoft /proc/version 2>/dev/null; then
+            PLATFORM="wsl"
+        else
+            PLATFORM="linux"
+        fi
+        ;;
+    *) err "Unsupported OS: $OS_TYPE"; exit 1 ;;
+esac
+
 REPO_SAAS="git@github.com:danmcrae-dev/netentive-saas.git"
 REPO_MCP="git@github.com:danmcrae-dev/netentive-mcp.git"
 REPO_CORE="git@github.com:danmcrae-dev/netentive-core.git"
 SAAS_PORT=8000
 MCP_PORT=8443
 
-# Colima VM sizing — adjustable via env vars
+# Colima VM sizing — adjustable via env vars (macOS only)
 COLIMA_CPU="${COLIMA_CPU:-4}"
 COLIMA_MEMORY="${COLIMA_MEMORY:-6}"
 COLIMA_DISK="${COLIMA_DISK:-50}"
@@ -80,20 +99,48 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 title() { echo -e "\n${BOLD}=== $* ===${NC}\n"; }
 
-cat << 'BANNER'
+# Platform-aware banner
+case "$PLATFORM" in
+    mac)
+        BANNER_POWERED="Powered by Colima (no Docker Desktop required)"
+        ;;
+    linux)
+        BANNER_POWERED="Powered by Docker CE (native Linux)"
+        ;;
+    wsl)
+        BANNER_POWERED="Powered by Docker Desktop (WSL2 backend)"
+        ;;
+esac
+
+# Build the banner with proper padding (box interior = 63 chars between | borders)
+BANNER_LINE2="        ${BANNER_POWERED}"
+BANNER_PAD2=$(( 63 - ${#BANNER_LINE2} ))
+printf -v BANNER_PAD2_STR '%*s' "$BANNER_PAD2" ''
+BANNER_LINE2="${BANNER_LINE2}${BANNER_PAD2_STR}"
+
+cat << BANNER
 +---------------------------------------------------------------+
 |         Netentive Platform - One-Command Deploy                |
 |        SaaS + MCP + Agent + PostgreSQL + Redis                 |
-|        Powered by Colima (no Docker Desktop required)          |
+|${BANNER_LINE2}|
 +---------------------------------------------------------------+
 BANNER
 
 echo "  Install directory: ${INSTALL_DIR}"
 echo "  SaaS port:          ${SAAS_PORT}"
 echo "  MCP port:           ${MCP_PORT}"
-echo "  Colima VM:          ${COLIMA_CPU} CPU, ${COLIMA_MEMORY}GB RAM, ${COLIMA_DISK}GB disk"
-echo "  Platform:           $(uname -s) $(uname -m)"
+if [[ "$PLATFORM" == "mac" ]]; then
+    echo "  Colima VM:          ${COLIMA_CPU} CPU, ${COLIMA_MEMORY}GB RAM, ${COLIMA_DISK}GB disk"
+fi
+echo "  Platform:           $(uname -s) $(uname -m) [${PLATFORM}]"
 echo ""
+
+# ==================================================================
+# Steps 1-3: Install prerequisites + Docker + start runtime
+# (platform-specific)
+# ==================================================================
+
+if [[ "$PLATFORM" == "mac" ]]; then
 
 # ==================================================================
 # Step 1: Install Homebrew (if missing)
@@ -227,6 +274,181 @@ else
     warn "If this causes issues, run: colima stop && colima start --network-address"
 fi
 
+elif [[ "$PLATFORM" == "linux" ]]; then
+
+# ==================================================================
+# Step 1: Check package manager
+# ==================================================================
+title "Step 1: Checking package manager"
+
+PKG_MGR=""
+if command -v apt-get &>/dev/null; then
+    PKG_MGR="apt-get"
+    ok "apt-get found"
+elif command -v dnf &>/dev/null; then
+    warn "dnf detected — automated Docker CE install not yet supported for RHEL/Fedora."
+    warn "Please install Docker CE manually, then re-run this script."
+    warn "See: https://docs.docker.com/engine/install/fedora/"
+    exit 1
+elif command -v yum &>/dev/null; then
+    warn "yum detected — automated Docker CE install not yet supported for CentOS/RHEL."
+    warn "Please install Docker CE manually, then re-run this script."
+    warn "See: https://docs.docker.com/engine/install/centos/"
+    exit 1
+else
+    err "No supported package manager found (apt-get/dnf/yum)."
+    err "Please install Docker CE manually, then re-run this script."
+    exit 1
+fi
+
+# ==================================================================
+# Step 2: Install Docker CE + docker-compose-plugin + git via apt-get
+# ==================================================================
+title "Step 2: Installing Docker CE"
+
+info "Installing prerequisite packages..."
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+
+info "Adding Docker's official GPG key..."
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+info "Adding Docker repository..."
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+
+sudo apt-get update
+info "Installing docker-ce, docker-compose-plugin, and git..."
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin git
+ok "Docker CE installed"
+
+# Add current user to docker group (avoids needing sudo for docker commands)
+info "Adding user '$USER' to docker group..."
+sudo usermod -aG docker "$USER"
+warn "You may need to log out and back in for the docker group change to take effect."
+warn "For now, this script will use sudo where needed."
+
+# Verify docker CLI is available
+if ! command -v docker &>/dev/null; then
+    err "docker CLI not found after install. Check your PATH."
+    exit 1
+fi
+ok "Docker CLI: $(docker --version)"
+
+# Verify docker compose plugin
+if ! docker compose version &>/dev/null; then
+    err "docker compose plugin not found. Install docker-compose-plugin."
+    exit 1
+fi
+ok "Compose: $(docker compose version 2>/dev/null | head -1)"
+
+# ==================================================================
+# Step 3: Start Docker service
+# ==================================================================
+title "Step 3: Starting Docker service"
+
+info "Starting Docker service..."
+sudo systemctl start docker
+ok "Docker service started"
+
+# Pre-pull base images (shared)
+info "Pre-pulling base images..."
+BASE_IMAGES="python:3.11-slim node:20-slim node:20-alpine nginx:alpine"
+for img in $BASE_IMAGES; do
+    info "  Pulling $img..."
+    if docker pull "$img" 2>/dev/null; then
+        ok "  $img ready"
+    else
+        warn "  Failed to pull $img — build may fail. Will retry during build."
+    fi
+done
+ok "Base images pre-pulled"
+
+# Verify Docker daemon is responsive
+if ! docker info &>/dev/null; then
+    err "Docker daemon is not responding. Try: sudo systemctl start docker"
+    exit 1
+fi
+ok "Docker daemon is running"
+
+# Verify host networking works (our compose files use network_mode: host)
+if docker run --rm --network host alpine sh -c "echo host-network-ok" 2>/dev/null | grep -q "host-network-ok"; then
+    ok "Host networking is functional"
+else
+    warn "Host networking test failed — containers may not bind to localhost directly"
+fi
+
+elif [[ "$PLATFORM" == "wsl" ]]; then
+
+# ==================================================================
+# Step 1: Verify Docker Desktop is installed
+# ==================================================================
+title "Step 1: Checking Docker Desktop"
+
+if ! command -v docker &>/dev/null; then
+    err "Docker not found. Install Docker Desktop for Windows with WSL2 backend:"
+    err "  1. Download from https://www.docker.com/products/docker-desktop/"
+    err "  2. During install, select \"Use WSL 2 instead of Hyper-V\""
+    err "  3. In Docker Desktop settings, ensure WSL2 integration is enabled for your distro"
+    err "  4. Restart this script"
+    exit 1
+fi
+ok "Docker CLI found: $(docker --version)"
+
+# ==================================================================
+# Step 2: Verify docker compose + daemon
+# ==================================================================
+title "Step 2: Verifying Docker Desktop"
+
+if ! docker compose version &>/dev/null; then
+    err "docker compose not available. Ensure Docker Desktop is running with WSL2 integration enabled."
+    err "Check Settings > Resources > WSL Integration in Docker Desktop."
+    exit 1
+fi
+ok "Compose: $(docker compose version 2>/dev/null | head -1)"
+
+if ! docker info &>/dev/null; then
+    err "Docker daemon is not responding."
+    err "Start Docker Desktop for Windows, then re-run this script."
+    exit 1
+fi
+ok "Docker daemon is running via Docker Desktop"
+
+# ==================================================================
+# Step 3: Pre-pull base images + host networking test
+# ==================================================================
+title "Step 3: Preparing Docker environment"
+
+# Pre-pull base images (shared)
+info "Pre-pulling base images..."
+BASE_IMAGES="python:3.11-slim node:20-slim node:20-alpine nginx:alpine"
+for img in $BASE_IMAGES; do
+    info "  Pulling $img..."
+    if docker pull "$img" 2>/dev/null; then
+        ok "  $img ready"
+    else
+        warn "  Failed to pull $img — build may fail. Will retry during build."
+    fi
+done
+ok "Base images pre-pulled"
+
+# Verify host networking works (our compose files use network_mode: host)
+# WSL2 may handle this differently — Docker Desktop's WSL2 integration
+# forwards localhost ports from Windows to the WSL2 VM.
+if docker run --rm --network host alpine sh -c "echo host-network-ok" 2>/dev/null | grep -q "host-network-ok"; then
+    ok "Host networking is functional"
+else
+    warn "Host networking not available in WSL2 — containers will bind to WSL2's IP."
+    warn "Docker Desktop's WSL2 integration should forward localhost ports to Windows."
+    warn "If localhost:8000 doesn't work in your browser, check Docker Desktop settings."
+fi
+
+fi # end platform-specific Steps 1-3
+
+# ==================================================================
+# Architecture detection (shared)
+# ==================================================================
 ARCH=$(uname -m)
 case "$ARCH" in
     x86_64|amd64)  ARCH_LABEL="x86_64"  ;;
@@ -445,27 +667,11 @@ SAAS_ENV="$INSTALL_DIR/netentive-saas/.env"
     echo "# Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     echo ""
     echo "# Database"
-    echo "DATABASE_URL=postgresql://netentive:${DB_PASSWORD}@localhost:5432/netentive"
+    echo "DATABASE_URL=postgresql://netentive:***@localhost:5432/netentive"
     echo "DB_PASSWORD=${DB_PASSWORD}"
     echo ""
     echo "# Redis"
-    echo "REDIS_URL=redis://localhost:6379"
-    echo "MCP_SERVICE_PASSWORD=${MCP_SERVICE_PASSWORD}"
-    echo ""
-    echo "# Credential Vault (AES-256 Fernet key)"
-    echo "VAULT_ENCRYPTION_KEY=${VAULT_KEY}"
-    echo ""
-    echo "# Security"
-    echo "SECRET_KEY=${SECRET_KEY}"
-    echo "ACCESS_TOKEN_EXPIRE_MINUTES=1440"
-    echo "ALGORITHM=HS256"
-    echo ""
-    echo "# PHP Bridge (legacy auth — leave empty to use local auth only)"
-    echo "PHP_BRIDGE_SECRET="
-    echo "PHP_SITE_URL=https://netentive.ai"
-    echo ""
-    echo "# MCP integration"
-    echo "MCP_SERVICE_EMAIL=service@netentive.ai"
+    echo "REDIS_URL=redis://localhost:***@netentive.ai"
     echo "MCP_API_KEY=${MCP_API_KEY}"
     echo "MCP_SERVER_URL=http://localhost:${MCP_PORT}"
     echo "MCP_AGENT_ID=agent-01"
@@ -645,7 +851,7 @@ wait_for_health "http://localhost:${SAAS_PORT}/api/v1/status" "SaaS API" 30
 wait_for_health "http://localhost:${MCP_PORT}/health" "MCP Server" 30
 
 # ==================================================================
-# Step 11: Install auto-start on login (launchd)
+# Step 11: Install auto-start on login (platform-specific)
 # ==================================================================
 title "Step 11: Installing auto-start on login"
 
@@ -658,28 +864,56 @@ if [[ ! -d "$DEPLOY_SCRIPTS_DIR" ]]; then
     git clone --depth 1 https://github.com/danmcrae-dev/netentive-deploy.git "$DEPLOY_REPO_DIR" 2>/dev/null || true
 fi
 
-if [[ -f "$DEPLOY_SCRIPTS_DIR/netentive-start.sh" ]]; then
+if [[ ! -f "$DEPLOY_SCRIPTS_DIR/netentive-start.sh" ]]; then
+    warn "Startup script template not found, skipping auto-start installation"
+else
     info "Copying startup script to ${INSTALL_DIR}/netentive-start.sh"
     cp "$DEPLOY_SCRIPTS_DIR/netentive-start.sh" "$INSTALL_DIR/netentive-start.sh"
     chmod +x "$INSTALL_DIR/netentive-start.sh"
     ok "Startup script installed"
 
-    if [[ -f "$DEPLOY_SCRIPTS_DIR/com.netentive.startup.plist" ]]; then
-        info "Installing launchd agent..."
-        mkdir -p "$HOME/Library/LaunchAgents"
-        sed "s|__HOME__|${HOME}|g" "$DEPLOY_SCRIPTS_DIR/com.netentive.startup.plist" \
-            > "$HOME/Library/LaunchAgents/com.netentive.startup.plist"
-        launchctl load "$HOME/Library/LaunchAgents/com.netentive.startup.plist" 2>/dev/null || true
-        ok "Auto-start installed — Netentive will start automatically on login"
-    else
-        warn "launchd plist template not found, skipping auto-start installation"
+    if [[ "$PLATFORM" == "mac" ]]; then
+        # macOS: launchd plist installation
+        if [[ -f "$DEPLOY_SCRIPTS_DIR/com.netentive.startup.plist" ]]; then
+            info "Installing launchd agent..."
+            mkdir -p "$HOME/Library/LaunchAgents"
+            sed "s|__HOME__|${HOME}|g" "$DEPLOY_SCRIPTS_DIR/com.netentive.startup.plist" \
+                > "$HOME/Library/LaunchAgents/com.netentive.startup.plist"
+            launchctl load "$HOME/Library/LaunchAgents/com.netentive.startup.plist" 2>/dev/null || true
+            ok "Auto-start installed — Netentive will start automatically on login"
+        else
+            warn "launchd plist template not found, skipping auto-start installation"
+        fi
+
+    elif [[ "$PLATFORM" == "linux" ]]; then
+        # Linux: systemd user service
+        if [[ -f "$DEPLOY_SCRIPTS_DIR/netentive.service" ]]; then
+            info "Installing systemd user service..."
+            mkdir -p "$HOME/.config/systemd/user"
+            sed "s|__HOME__|${HOME}|" "$DEPLOY_SCRIPTS_DIR/netentive.service" \
+                > "$HOME/.config/systemd/user/netentive.service"
+            systemctl --user enable netentive.service 2>/dev/null || true
+            systemctl --user daemon-reload 2>/dev/null || true
+            ok "Auto-start installed — Netentive will start on login via systemd"
+            info "Note: You may need to run 'loginctl enable-linger $USER' for auto-start without an active session."
+        else
+            warn "systemd service template not found, skipping auto-start installation"
+        fi
+
+    elif [[ "$PLATFORM" == "wsl" ]]; then
+        # WSL2: Windows Task Scheduler via PowerShell
+        if [[ -f "$DEPLOY_SCRIPTS_DIR/install-windows-autostart.ps1" ]]; then
+            info "To install auto-start on Windows, run this in PowerShell:"
+            info "  wsl -e bash -c 'cat ~/netentive/netentive-deploy/scripts/install-windows-autostart.ps1' | powershell.exe -"
+            ok "PowerShell auto-start script available at ${DEPLOY_SCRIPTS_DIR}/install-windows-autostart.ps1"
+        else
+            warn "PowerShell auto-start template not found, skipping"
+        fi
     fi
-else
-    warn "Startup script template not found, skipping auto-start installation"
 fi
 
 # ==================================================================
-# Step 12: Show status + summary
+# Step 12: Show status + summary (platform-adaptive)
 # ==================================================================
 title "Step 12: Deployment status"
 
@@ -723,21 +957,59 @@ echo ""
 echo "  To stop:"
 echo "    cd ${INSTALL_DIR}/netentive-saas/deployment && docker compose down"
 echo "    cd ${INSTALL_DIR}/netentive-mcp && docker compose down"
-echo "    colima stop   (stops the Docker VM)"
-echo ""
-echo "  To restart:"
-echo "    colima start  (starts the Docker VM)"
-echo "    cd ${INSTALL_DIR}/netentive-saas/deployment && docker compose up -d"
-echo "    cd ${INSTALL_DIR}/netentive-mcp && docker compose up -d"
-echo ""
-echo "  To update (pull latest + rebuild):"
-echo "    cd ${INSTALL_DIR}/netentive-saas && git pull && cd deployment && docker compose up -d --build"
-echo "    cd ${INSTALL_DIR}/netentive-mcp && git pull && docker compose up -d --build"
-echo ""
-echo "  Colima VM management:"
-echo "    colima status        - check VM status"
-echo "    colima stop          - stop VM (frees RAM)"
-echo "    colima start         - start VM (resumes containers)"
-echo "    colima restart       - restart VM"
-echo "    colima list          - list VMs"
+
+if [[ "$PLATFORM" == "mac" ]]; then
+    echo "    colima stop   (stops the Docker VM)"
+    echo ""
+    echo "  To restart:"
+    echo "    colima start  (starts the Docker VM)"
+    echo "    cd ${INSTALL_DIR}/netentive-saas/deployment && docker compose up -d"
+    echo "    cd ${INSTALL_DIR}/netentive-mcp && docker compose up -d"
+    echo ""
+    echo "  To update (pull latest + rebuild):"
+    echo "    cd ${INSTALL_DIR}/netentive-saas && git pull && cd deployment && docker compose up -d --build"
+    echo "    cd ${INSTALL_DIR}/netentive-mcp && git pull && docker compose up -d --build"
+    echo ""
+    echo "  Colima VM management:"
+    echo "    colima status        - check VM status"
+    echo "    colima stop          - stop VM (frees RAM)"
+    echo "    colima start         - start VM (resumes containers)"
+    echo "    colima restart       - restart VM"
+    echo "    colima list          - list VMs"
+
+elif [[ "$PLATFORM" == "linux" ]]; then
+    echo "    sudo systemctl stop docker"
+    echo ""
+    echo "  To restart:"
+    echo "    sudo systemctl start docker"
+    echo "    cd ${INSTALL_DIR}/netentive-saas/deployment && docker compose up -d"
+    echo "    cd ${INSTALL_DIR}/netentive-mcp && docker compose up -d"
+    echo ""
+    echo "  To update (pull latest + rebuild):"
+    echo "    cd ${INSTALL_DIR}/netentive-saas && git pull && cd deployment && docker compose up -d --build"
+    echo "    cd ${INSTALL_DIR}/netentive-mcp && git pull && docker compose up -d --build"
+    echo ""
+    echo "  Docker service management:"
+    echo "    sudo systemctl status docker   - check service status"
+    echo "    sudo systemctl stop docker     - stop Docker (frees RAM)"
+    echo "    sudo systemctl start docker    - start Docker"
+    echo "    sudo systemctl restart docker  - restart Docker"
+
+elif [[ "$PLATFORM" == "wsl" ]]; then
+    echo "    Close Docker Desktop"
+    echo ""
+    echo "  To restart:"
+    echo "    Start Docker Desktop"
+    echo "    cd ${INSTALL_DIR}/netentive-saas/deployment && docker compose up -d"
+    echo "    cd ${INSTALL_DIR}/netentive-mcp && docker compose up -d"
+    echo ""
+    echo "  To update (pull latest + rebuild):"
+    echo "    cd ${INSTALL_DIR}/netentive-saas && git pull && cd deployment && docker compose up -d --build"
+    echo "    cd ${INSTALL_DIR}/netentive-mcp && git pull && docker compose up -d --build"
+    echo ""
+    echo "  Docker Desktop management:"
+    echo "    Start Docker Desktop from Windows Start menu"
+    echo "    Check Settings > Resources > WSL Integration is enabled"
+fi
+
 echo ""

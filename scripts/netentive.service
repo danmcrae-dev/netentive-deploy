@@ -1,0 +1,12 @@
+[Unit]
+Description=Netentive Platform Auto-Start
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=__HOME__/netentive/netentive-start.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target
