@@ -134,6 +134,20 @@ if ! command -v docker &>/dev/null; then
     exit 1
 fi
 ok "Docker CLI: $(docker --version)"
+
+# Ensure `docker compose` (v2 plugin) is available — Homebrew installs the
+# plugin to a Cellar path that isn't always on Docker's cli-plugins search list.
+if ! docker compose version &>/dev/null; then
+    info "Linking docker-compose plugin..."
+    mkdir -p "$HOME/.docker/cli-plugins"
+    COMPOSE_PLUGIN=$(find /opt/homebrew/Cellar/docker-compose/*/lib/docker/cli-plugins/docker-compose 2>/dev/null | head -1)
+    if [[ -n "$COMPOSE_PLUGIN" ]]; then
+        ln -sf "$COMPOSE_PLUGIN" "$HOME/.docker/cli-plugins/docker-compose"
+        ok "docker compose plugin linked"
+    else
+        warn "Could not find docker-compose plugin — falling back to docker-compose"
+    fi
+fi
 ok "Compose: $(docker compose version 2>/dev/null || docker-compose --version 2>/dev/null | head -1)"
 
 # ==================================================================
